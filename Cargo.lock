@@ -144,6 +144,7 @@ dependencies = [
  "iced_native",
  "log",
  "playlist-decoder",
+ "quick-xml 0.21.0",
  "rand 0.8.3",
  "rodio",
  "rusqlite",
@@ -2270,7 +2271,7 @@ version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3fca9e102ed487c5b190b242d0e2614e25170d11e688700a2b11c70159914afe"
 dependencies = [
- "quick-xml",
+ "quick-xml 0.20.0",
 ]
 
 [[package]]
@@ -2336,6 +2337,15 @@ name = "quick-xml"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26aab6b48e2590e4a64d1ed808749ba06257882b461d01ca71baeb747074a6dd"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0452695941410a58c8ce4391707ba9bad26a247173bd9886a05a5e8a8babec75"
 dependencies = [
  "memchr",
 ]
