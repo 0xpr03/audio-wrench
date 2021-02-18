@@ -1,23 +1,36 @@
-use quick_xml::{Writer, events::{BytesDecl, BytesText}};
-use quick_xml::Reader;
-use quick_xml::events::{Event, BytesEnd, BytesStart};
+use quick_xml::{events::{BytesEnd, BytesStart, Event}};
+
+use quick_xml::{
+    events::{BytesDecl, BytesText},
+    Writer,
+};
+
+use std::{
+    fs::File,
+    io::{Cursor, Write},
+};
 use url::Url;
-use std::{fs::File, io::{Cursor, Write}, path::Path};
-use std::iter;
 
 use crate::prelude::*;
 
 #[test]
 fn test() {
-    let mut reader = Reader::from_str(include_str!("../tests/test_playlist.xml"));
+    let mut reader = quick_xml::Reader::from_str(include_str!("../tests/test_playlist.xml"));
     let mut buf = Vec::new();
     loop {
         match reader.read_event(&mut buf) {
-            Ok(Event::Eof) => {break;},
-            Ok(v) => {dbg!(v);},
-            Err(e) => {dbg!(e); break;},
+            Ok(Event::Eof) => {
+                break;
+            }
+            Ok(v) => {
+                dbg!(v);
+            }
+            Err(e) => {
+                dbg!(e);
+                break;
+            }
         }
-    
+
         // if we don't keep a borrow elsewhere, we can clear the buffer to keep memory usage low
         buf.clear();
     }
@@ -25,8 +38,11 @@ fn test() {
 
 #[test]
 fn test_write() {
-    let files = vec![String::from("C:\\asd\\asd.wav"),String::from("D:\\\\asd_asd2ü.mp3")];
-    write_playlist(files.iter(),"../tests/test.xspf").unwrap();
+    let files = vec![
+        String::from("C:\\asd\\asd.wav"),
+        String::from("D:\\\\asd_asd2ü.mp3"),
+    ];
+    write_playlist(files.iter(), "../tests/test.xspf").unwrap();
 }
 
 enum Track<'a> {
@@ -35,7 +51,7 @@ enum Track<'a> {
 }
 
 impl<'a> Track<'a> {
-    fn as_str(&'a self) -> &'a str{
+    fn as_str(&'a self) -> &'a str {
         match self {
             Track::String(v) => v.as_str(),
             Track::Url(u) => u.as_str(),
@@ -43,19 +59,22 @@ impl<'a> Track<'a> {
     }
 }
 
-pub fn write_playlist<'a, I>(files: I,write_file: &str) -> Result<()>
+pub fn write_playlist<'a, I>(files: I, write_file: &str) -> Result<()>
 where
-    I: Iterator<Item = &'a String> {
+    I: Iterator<Item = &'a String>,
+{
     let mut buf = Vec::new();
-    let mut writer = Writer::new_with_indent(Cursor::new(&mut buf),b' ',4);
-    
-    writer.write_event(Event::Decl(BytesDecl::new(b"1.0",Some(b"UTF-8"),None)))?;
+    let mut writer = Writer::new_with_indent(Cursor::new(&mut buf), b' ', 4);
+
+    writer.write_event(Event::Decl(BytesDecl::new(b"1.0", Some(b"UTF-8"), None)))?;
     let mut playlist = BytesStart::borrowed_name(b"playlist");
-    playlist.push_attribute(("version","1"));
-    playlist.push_attribute(("xmlns","http://xspf.org/ns/0/"));
+    playlist.push_attribute(("version", "1"));
+    playlist.push_attribute(("xmlns", "http://xspf.org/ns/0/"));
     writer.write_event(Event::Start(playlist))?;
     writer.write_event(Event::Start(BytesStart::borrowed_name(b"title")))?;
-    writer.write_event(Event::Text(BytesText::from_plain_str("Audio-Wrench Favorites")))?;
+    writer.write_event(Event::Text(BytesText::from_plain_str(
+        "Audio-Wrench Favorites",
+    )))?;
     writer.write_event(Event::End(BytesEnd::borrowed(b"title")))?;
     let titles = BytesStart::borrowed_name(b"trackList");
     writer.write_event(Event::Start(titles))?;
@@ -65,7 +84,10 @@ where
         } else {
             match Url::from_file_path(f) {
                 Ok(v) => Track::Url(v),
-                Err(_) => {warn!("Ignoring file {} on export. URLs are not supported!",f); continue; },
+                Err(_) => {
+                    warn!("Ignoring file {} on export. URLs are not supported!", f);
+                    continue;
+                }
             }
         };
         writer.write_event(Event::Start(BytesStart::borrowed_name(b"track")))?;
