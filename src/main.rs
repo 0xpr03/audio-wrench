@@ -78,7 +78,8 @@ impl PlaybackControl {
         if let Some(v) = self.playlists.get_mut(&self.path) {
             if !v.is_empty() {
                 if !self.current_file.is_empty() {
-                    v.remove(0);
+                    let removed = v.remove(0);
+                    trace!("Removing {}",removed);
                 }
             }
             if !v.is_empty() {
@@ -116,7 +117,7 @@ impl PlaybackControl {
                             Ok(_) => {
                                 match std::fs::rename(config_path(true), config_path(false)) {
                                     Ok(_) => info!("Config saved"),
-                                    Err(e) => error!("Can't move file over backup: {}".e),
+                                    Err(e) => error!("Can't move file over backup: {}",e),
                                 }
                             },
                         },
@@ -148,6 +149,7 @@ enum PlayerCommand {
 enum PlayerStatus {
     Playing(String, Option<Duration>),
     Ended,
+    InvalidFile(String),
     Paused,
     Playtime(Option<Duration>),
 }
@@ -184,12 +186,12 @@ fn spawn_audio() -> Result<(
                                 sink.set_volume(calc_volume(v));
                             }
                         }
-                        PlayerCommand::Play(path, volume) => {
+                        PlayerCommand::Play(origin_path, volume) => {
                             ended = false;
                             if let Some(ref v) = sink {
                                 v.stop();
                             }
-                            let path = match Url::parse(&path) {
+                            let path = match Url::parse(&origin_path) {
                                 Ok(v) => match v.to_file_path() {
                                     Ok(v) => v,
                                     Err(_) => {
@@ -197,7 +199,7 @@ fn spawn_audio() -> Result<(
                                         continue;
                                     }
                                 },
-                                Err(_e) => path.into(),
+                                Err(_e) => origin_path.clone().into(),
                             };
                             match std::fs::File::open(&path) {
                                 Ok(file) => {
@@ -206,7 +208,11 @@ fn spawn_audio() -> Result<(
                                     let input = match rodio::Decoder::new(file) {
                                         Ok(v) => v,
                                         Err(e) => {
-                                            warn!("Can't play {:?} unsupported format?", e);
+                                            warn!("Can't play {:?} unsupported format?: {:?}",origin_path, e);
+                                            
+                                            update_tx
+                                            .send(PlayerStatus::InvalidFile(origin_path.clone()))
+                                            .expect("Can't send playback status!");
                                             continue;
                                         }
                                     };
@@ -499,6 +505,13 @@ impl Application for PlaybackControl {
                         }
                         PlayerStatus::Playtime(time) => {
                             self.playtime = time;
+                        }
+                        PlayerStatus::InvalidFile(f) => {
+                            dbg!(&f);
+                            // set as file, so play_next removes it
+                            self.current_file = f;
+                            self.play_next();
+                            self.current_file = String::new();
                         }
                     }
                 }
