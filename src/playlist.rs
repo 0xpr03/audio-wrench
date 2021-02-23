@@ -1,4 +1,4 @@
-use quick_xml::{events::{BytesEnd, BytesStart, Event}};
+use quick_xml::events::{BytesEnd, BytesStart, Event};
 
 use quick_xml::{
     events::{BytesDecl, BytesText},

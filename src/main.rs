@@ -3,41 +3,39 @@
 use dirs::data_local_dir;
 use iced::{executor, window, Align, Application, Element, Settings, Subscription};
 
-use log::LevelFilter;
-use url::Url;
+use log::{log_enabled, LevelFilter};
+use player::{PlayerCommand, PlayerStatus};
 
 pub mod prelude {
     pub use log::{debug, error, info, trace, warn};
     pub use stable_eyre::eyre::{eyre, Report, WrapErr};
     pub type Result<T> = std::result::Result<T, Report>;
 }
+mod player;
 mod playlist;
 
 use prelude::*;
 
 use iced_native::{
-    button, slider, Button, Column, Command, HorizontalAlignment, Length, Row, Slider,
-    Text,
+    button, slider, Button, Column, Command, HorizontalAlignment, Length, Row, Slider, Text,
 };
 use rand::prelude::*;
-use rodio::{Sink, Source};
+
 use serde::Deserialize;
 use serde::Serialize;
-use std::{thread, time::Instant};
+use std::thread;
 use std::{
     borrow::Cow,
     collections::HashMap,
     fs::File,
     io::Write,
     path::PathBuf,
-    sync::mpsc::{Receiver, Sender, TryRecvError},
+    sync::mpsc::{Receiver, Sender},
     time::Duration,
 };
 use std::{collections::HashSet, thread::JoinHandle};
 
-use std::sync::{mpsc::channel};
-
-const SAVE_INTERVAL: Duration = Duration::from_secs(60*30);
+const SAVE_INTERVAL: Duration = Duration::from_secs(60 * 30);
 
 #[derive(Serialize, Deserialize, Default)]
 struct ConfigData<'a> {
@@ -55,6 +53,7 @@ struct PlaybackControl {
     pause: button::State,
     favorite: button::State,
     export_favorites: button::State,
+    trash_current: button::State,
     data_favorites: HashSet<String>,
     is_favorite: bool,
     volume_input: slider::State,
@@ -65,7 +64,7 @@ struct PlaybackControl {
     tx: Sender<PlayerCommand>,
     rx: Receiver<PlayerStatus>,
     current_playlist: String,
-    /// Displayed current file, 
+    /// Displayed current file,
     /// also used by play_next to remove the current file from the playlist, if this is not empty
     current_file: String,
     playlists: HashMap<PathBuf, Vec<String>>,
@@ -79,7 +78,7 @@ impl PlaybackControl {
             if !v.is_empty() {
                 if !self.current_file.is_empty() {
                     let removed = v.remove(0);
-                    trace!("Removing {}",removed);
+                    trace!("Removing {}", removed);
                 }
             }
             if !v.is_empty() {
@@ -106,24 +105,93 @@ impl PlaybackControl {
             favorites: Cow::Borrowed(&self.data_favorites),
         };
         match serde_json::to_string(&data) {
-            Err(e) => warn!("Can't serialize data! {}",e),
+            Err(e) => warn!("Can't serialize data! {}", e),
             Ok(v) => {
-                thread::spawn(move|| {
+                thread::spawn(move || {
                     let file = config_path(true);
                     match File::create(&file) {
-                        Err(e) => warn!("Can't create config file {:?}: {}",file,e),
+                        Err(e) => warn!("Can't create config file {:?}: {}", file, e),
                         Ok(mut file) => match file.write_all(v.as_bytes()) {
-                            Err(e) => warn!("Error writing config {}",e),
-                            Ok(_) => {
-                                match std::fs::rename(config_path(true), config_path(false)) {
-                                    Ok(_) => info!("Config saved"),
-                                    Err(e) => error!("Can't move file over backup: {}",e),
-                                }
+                            Err(e) => warn!("Error writing config {}", e),
+                            Ok(_) => match std::fs::rename(config_path(true), config_path(false)) {
+                                Ok(_) => info!("Config saved"),
+                                Err(e) => error!("Can't move file over backup: {}", e),
                             },
                         },
                     }
-                }); 
+                });
+            }
+        }
+    }
+
+    /// Handle time tick for updating UI from player state updates
+    fn handle_tick(&mut self) {
+        if let Ok(msg) = self.rx.try_recv() {
+            if log_enabled!(log::Level::Trace) {
+                match msg {
+                    PlayerStatus::Playtime(_) => (),
+                    _ => trace!("Player state: {:?}", msg),
+                }
+            }
+            match msg {
+                PlayerStatus::Playing(f, length) => {
+                    self.current_file = f;
+                    self.is_paused = false;
+                    self.is_favorite = self.data_favorites.contains(&self.current_file);
+                    debug!("Length {:?}", length);
+                    self.length = length;
+                }
+                PlayerStatus::Ended => {
+                    debug!("Playback ended");
+                    self.play_next();
+                    self.current_file = String::new();
+                }
+                PlayerStatus::Paused => {
+                    self.is_paused = true;
+                }
+                PlayerStatus::Playtime(time) => {
+                    self.playtime = time;
+                }
+                PlayerStatus::InvalidFile(f) => {
+                    dbg!(&f);
+                    // set as file, so play_next removes it
+                    self.current_file = f;
+                    self.play_next();
+                    self.current_file = String::new();
+                }
+            }
+        }
+    }
+
+    fn file_dropped(&mut self, file: PathBuf) {
+        match std::fs::read_to_string(&file) {
+            Ok(data) => match playlist_decoder::decode(&data) {
+                Ok(mut playlist) => {
+                    if let Some(v) = self.playlists.get_mut(&file) {
+                        if v.is_empty() {
+                            v.append(&mut playlist);
+                        }
+                    } else {
+                        playlist.shuffle(&mut thread_rng());
+                        self.playlists.insert(file.clone(), playlist);
+                    }
+                    self.path = file;
+                    // reset current_file to not remove this file from playback
+                    self.current_file = String::new();
+                    self.play_next();
+                }
+                Err(e) => error!("{}", e),
             },
+            Err(e) => warn!("Can't open dropped file {}", e),
+        }
+    }
+
+    fn trash_file(&mut self) {
+        if !self.current_file.is_empty() {
+            match trash::delete(&self.current_file) {
+                Ok(_) => info!("Trashed {}", self.current_file),
+                Err(e) => error!("Can't trash file {}: {}", self.current_file, e),
+            }
         }
     }
 }
@@ -138,150 +206,7 @@ pub enum Message {
     ToggleFavorite,
     ExportFavorites,
     SaveConfig,
-}
-
-enum PlayerCommand {
-    Volume(u8),
-    Play(String, u8),
-    Pause,
-}
-
-enum PlayerStatus {
-    Playing(String, Option<Duration>),
-    Ended,
-    InvalidFile(String),
-    Paused,
-    Playtime(Option<Duration>),
-}
-
-fn calc_volume(v: u8) -> f32 {
-    (v as f32) / 100.0
-}
-
-fn spawn_audio() -> Result<(
-    Sender<PlayerCommand>,
-    Receiver<PlayerStatus>,
-    JoinHandle<()>,
-)> {
-    let (tx, rx) = channel::<PlayerCommand>();
-    let (update_tx, state_rx) = channel::<PlayerStatus>();
-    let child = thread::Builder::new()
-        .name("audio controller".to_string())
-        .spawn(move || {
-            let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
-            let mut sink: Option<Sink> = None;
-            let mut last_file: String = Default::default();
-            let mut ended = false;
-            let mut length: Option<Duration> = None;
-            
-            let mut play_start: Option<Instant> = None;
-            let mut pause_start: Option<Instant> = None;
-            let mut pause_time: Duration = Default::default();
-
-            loop {
-                match rx.try_recv() {
-                    Ok(msg) => match msg {
-                        PlayerCommand::Volume(v) => {
-                            if let Some(ref sink) = sink {
-                                sink.set_volume(calc_volume(v));
-                            }
-                        }
-                        PlayerCommand::Play(origin_path, volume) => {
-                            ended = false;
-                            if let Some(ref v) = sink {
-                                v.stop();
-                            }
-                            let path = match Url::parse(&origin_path) {
-                                Ok(v) => match v.to_file_path() {
-                                    Ok(v) => v,
-                                    Err(_) => {
-                                        warn!("Can't play URLs, skipping");
-                                        continue;
-                                    }
-                                },
-                                Err(_e) => origin_path.clone().into(),
-                            };
-                            match std::fs::File::open(&path) {
-                                Ok(file) => {
-                                    debug!("Starting playback");
-                                    last_file = path.to_string_lossy().into_owned();
-                                    let input = match rodio::Decoder::new(file) {
-                                        Ok(v) => v,
-                                        Err(e) => {
-                                            warn!("Can't play {:?} unsupported format?: {:?}",origin_path, e);
-                                            
-                                            update_tx
-                                            .send(PlayerStatus::InvalidFile(origin_path.clone()))
-                                            .expect("Can't send playback status!");
-                                            continue;
-                                        }
-                                    };
-                                    length = input.total_duration();
-                                    debug!("size_hint {:?}", input.size_hint());
-                                    let new_sink = Sink::try_new(&stream_handle)
-                                        .expect("Can't open new playback-sink!");
-                                    new_sink.set_volume(calc_volume(volume));
-                                    new_sink.append(input);
-                                    sink = Some(new_sink);
-                                    update_tx
-                                        .send(PlayerStatus::Playing(last_file.clone(), length))
-                                        .expect("Can't send playback status!");
-                                    play_start = Some(Instant::now());
-                                    pause_time = Default::default();
-                                    pause_start = None;
-                                }
-                                Err(e) => warn!("{:?} {}", path, e),
-                            }
-                        }
-                        PlayerCommand::Pause => {
-                            ended = false;
-                            if let Some(ref mut sink) = sink {
-                                if sink.is_paused() {
-                                    if let Some(time) = pause_start {
-                                        pause_time = pause_time + time.elapsed();
-                                        pause_start = None;
-                                    }
-                                    sink.play();
-                                    update_tx
-                                        .send(PlayerStatus::Playing(last_file.clone(), length))
-                                        .expect("Can't send playback status!");
-                                } else {
-                                    pause_start = Some(Instant::now());
-                                    sink.pause();
-                                    update_tx
-                                        .send(PlayerStatus::Paused)
-                                        .expect("Can't send playback status!");
-                                }
-                            }
-                        }
-                    },
-                    Err(TryRecvError::Empty) => {
-                        if sink.as_ref().map_or(true, |v| v.empty()) && !ended {
-                            update_tx
-                                .send(PlayerStatus::Ended)
-                                .expect("Can't send playback status!");
-                            ended = true;
-                        } else {
-                            let playtime = match play_start {
-                                Some(play_start) => match pause_start {
-                                    Some(pause_start) => Some(play_start.elapsed() - pause_time - pause_start.elapsed()),
-                                    None => Some(play_start.elapsed() - pause_time),
-                                },
-                                None => None,
-                            };
-                            update_tx
-                                .send(PlayerStatus::Playtime(playtime))
-                                .expect("Can't send playback status!");
-                            thread::sleep(Duration::from_millis(150));
-                        }
-                    }
-                    Err(TryRecvError::Disconnected) => {
-                        break;
-                    }
-                }
-            }
-        })?;
-    Ok((tx, state_rx, child))
+    TrashFile,
 }
 
 /// Config file, temp specifies if a .bak version should be used
@@ -311,7 +236,7 @@ impl Default for PlaybackControl {
         } else {
             Default::default()
         };
-        let (tx, rx, child) = spawn_audio().expect("Can't start audio controller");
+        let (tx, rx, child) = player::Player::new().expect("Can't start audio controller");
         // TODO: don't use into_owned, avoid copy
         Self {
             path: data.path,
@@ -319,6 +244,7 @@ impl Default for PlaybackControl {
             pause: Default::default(),
             volume_input: Default::default(),
             favorite: Default::default(),
+            trash_current: Default::default(),
             export_favorites: Default::default(),
             volume: data.volume,
             tx,
@@ -377,7 +303,7 @@ impl Application for PlaybackControl {
                 format!("{:02}:{:02}", minutes, secs_total - (minutes * 60))
             }
         };
-        let timer_text = format!("{}/{}",playtime_text,length_text);
+        let timer_text = format!("{}/{}", playtime_text, length_text);
         let mut row_controls = Row::new()
             .align_items(Align::Center)
             .spacing(20)
@@ -387,10 +313,15 @@ impl Application for PlaybackControl {
             .push(Button::new(&mut self.pause, Text::new(pause_text)).on_press(Message::Pause));
 
         if !self.current_file.is_empty() {
-            row_controls = row_controls.push(
-                Button::new(&mut self.favorite, Text::new(fav_text))
-                    .on_press(Message::ToggleFavorite),
-            );
+            row_controls = row_controls
+                .push(
+                    Button::new(&mut self.favorite, Text::new(fav_text))
+                        .on_press(Message::ToggleFavorite),
+                )
+                .push(
+                    Button::new(&mut self.trash_current, Text::new("Trash File"))
+                        .on_press(Message::TrashFile),
+                );
         }
 
         Column::new()
@@ -462,60 +393,8 @@ impl Application for PlaybackControl {
             }
             Message::Window(iced_native::Event::Window(
                 iced_native::window::Event::FileDropped(f),
-            )) => {
-                match std::fs::read_to_string(&f) {
-                    Ok(data) => match playlist_decoder::decode(&data) {
-                        Ok(mut playlist) => {
-                            if let Some(v) = self.playlists.get_mut(&f) {
-                                if v.is_empty() {
-                                    v.append(&mut playlist);
-                                }
-                            } else {
-                                playlist.shuffle(&mut thread_rng());
-                                self.playlists.insert(f.clone(), playlist);
-                            }
-                            self.path = f;
-                            // reset current_file to not remove this file from playback
-                            self.current_file = String::new();
-                            self.play_next();
-                        }
-                        Err(e) => error!("{}", e),
-                    },
-                    Err(e) => warn!("Can't open playlist {}", e),
-                }
-            }
-            Message::Tick => {
-                //info!("Tick start");
-                if let Ok(msg) = self.rx.try_recv() {
-                    match msg {
-                        PlayerStatus::Playing(f, length) => {
-                            self.current_file = f;
-                            self.is_paused = false;
-                            self.is_favorite = self.data_favorites.contains(&self.current_file);
-                            debug!("Length {:?}", length);
-                            self.length = length;
-                        }
-                        PlayerStatus::Ended => {
-                            debug!("Playback ended");
-                            self.play_next();
-                            self.current_file = String::new();
-                        }
-                        PlayerStatus::Paused => {
-                            self.is_paused = true;
-                        }
-                        PlayerStatus::Playtime(time) => {
-                            self.playtime = time;
-                        }
-                        PlayerStatus::InvalidFile(f) => {
-                            dbg!(&f);
-                            // set as file, so play_next removes it
-                            self.current_file = f;
-                            self.play_next();
-                            self.current_file = String::new();
-                        }
-                    }
-                }
-            }
+            )) => self.file_dropped(f),
+            Message::Tick => self.handle_tick(),
             Message::Window(_) => (),
             Message::ToggleFavorite => {
                 if !self.current_file.is_empty() {
@@ -537,6 +416,7 @@ impl Application for PlaybackControl {
             Message::SaveConfig => {
                 self.store_state();
             }
+            Message::TrashFile => self.trash_file(),
         }
         Command::none()
     }
